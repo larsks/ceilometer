@@ -110,6 +110,7 @@ class InstanceDiscovery(plugin_base.DiscoveryBase):
         if self.method == "libvirt_metadata":
             # 4096 instances on a compute should be enough :)
             self._flavor_cache = cachetools.LRUCache(4096)
+            self._instance_cache = cachetools.LRUCache(4096)
         else:
             self.lock = threading.Lock()
             self.instances = {}
@@ -138,6 +139,14 @@ class InstanceDiscovery(plugin_base.DiscoveryBase):
     def get_flavor_id(self, name):
         try:
             return self.nova_cli.nova_client.flavors.find(name=name).id
+        except exceptions.NotFound:
+            return None
+
+    @cachetools.cachedmethod(operator.attrgetter('_instance_cache'))
+    def get_instance_details(self, uuid):
+        try:
+            s = self.nova_cli.nova_client.servers.get(uuid)
+            return s.to_dict()
         except exceptions.NotFound:
             return None
 
@@ -171,12 +180,23 @@ class InstanceDiscovery(plugin_base.DiscoveryBase):
             # metadata
 
             try:
+                owner = metadata_xml.find("./owner")
+
+                if list(owner):
+                    user_id = owner.find("./user").attrib["uuid"]
+                    project_id = owner.find("./project").attrib["uuid"]
+                else:
+                    LOG.warning(
+                        "Falling back to nova for domain uuid %s",
+                        domain.UUIDString())
+                    instance_details = self.get_instance_details(
+                        domain.UUIDString())
+                    user_id = instance_details['user_id']
+                    project_id = instance_details.get(
+                        'project_id', instance_details['tenant_id'])
+
                 flavor_xml = metadata_xml.find(
                     "./flavor")
-                user_id = metadata_xml.find(
-                    "./owner/user").attrib["uuid"]
-                project_id = metadata_xml.find(
-                    "./owner/project").attrib["uuid"]
                 instance_name = metadata_xml.find(
                     "./name").text
                 instance_arch = os_type_xml.attrib["arch"]
